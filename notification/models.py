@@ -14,7 +14,6 @@ from django.db import models
 from django.db.models.query import QuerySet
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.core.mail import send_mass_mail
 from django.core.urlresolvers import reverse
 from django.template import Context
 from django.template.loader import render_to_string
@@ -26,9 +25,17 @@ from django.contrib.auth.models import AnonymousUser
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes import generic
 
+from notification import backends
+NOTIFICATION_BACKENDS = backends.load_backends()
+NOTICE_MEDIA, NOTICE_MEDIA_DEFAULTS = backends.load_media_defaults(
+    backends=NOTIFICATION_BACKENDS
+)
+
+
 QUEUE_ALL = getattr(settings, "NOTIFICATION_QUEUE_ALL", False)
 
 AUTH_MODEL_STRING = getattr(settings, 'AUTH_USER_MODEL', 'auth.User')
+
 
 class LanguageStoreNotAvailable(Exception):
     pass
@@ -57,7 +64,9 @@ NOTICE_MEDIA = (
 
 # how spam-sensitive is the medium
 NOTICE_MEDIA_DEFAULTS = {
-    "1": 2 # email
+    0: 1,
+    1: 1,
+    2: 1
 }
 
 class NoticeSetting(models.Model):
@@ -75,6 +84,17 @@ class NoticeSetting(models.Model):
         verbose_name = _("notice setting")
         verbose_name_plural = _("notice settings")
         unique_together = ("user", "notice_type", "medium")
+
+    @classmethod
+    def for_user(cls, user, notice_type, medium):
+        try:
+            return cls._default_manager.get(user=user, notice_type=notice_type, medium=medium)
+        except cls.DoesNotExist:
+            default = (NOTICE_MEDIA_DEFAULTS[medium] <= notice_type.default)
+            setting = cls(user=user, notice_type=notice_type, medium=medium, send=default)
+            setting.save()
+            return setting
+
 
 
 def get_notification_setting(user, notice_type, medium):
@@ -267,32 +287,14 @@ def send_now(users, label, extra_context=None, on_site=True, sender=None):
     You can pass in on_site=False to prevent the notice emitted from being
     displayed on the site.
     """
+    sent = False
     if extra_context is None:
         extra_context = {}
-    
+
     notice_type = NoticeType.objects.get(label=label)
-    
-    protocol = getattr(settings, "DEFAULT_HTTP_PROTOCOL", "http")
-    current_site = Site.objects.get_current()
-    
-    notices_url = u"%s://%s%s" % (
-        protocol,
-        unicode(current_site),
-        reverse("notification_notices"),
-    )
-    
+
     current_language = get_language()
-    
-    formats = (
-        "short.txt",
-        "full.txt",
-        "notice.html",
-        "full.html",
-    ) # TODO make formats configurable
-    
-    from_email = u" ".join((sender.first_name or sender.username, sender.last_name, u"<{0}>".format(settings.DEFAULT_FROM_EMAIL))) if sender else settings.DEFAULT_FROM_EMAIL
-    
-    recipients = []
+
     for user in users:
         # get user language for user from language store defined in
         # NOTIFICATION_LANGUAGE_MODULE setting
@@ -300,41 +302,19 @@ def send_now(users, label, extra_context=None, on_site=True, sender=None):
             language = get_notification_language(user)
         except LanguageStoreNotAvailable:
             language = None
-        
+
         if language is not None:
             # activate the user's language
             activate(language)
-        
-        # update context with user specific translations
-        context = Context({
-            "recipient": user,
-            "sender": sender,
-            "notice": ugettext(notice_type.display),
-            "notices_url": notices_url,
-            "current_site": current_site,
-        })
-        context.update(extra_context)
-        
-        # get prerendered format messages
-        messages = get_formatted_messages(formats, label, context)
-        
-        # Strip newlines from subject
-        subject = "".join(render_to_string("notification/email_subject.txt", {
-            "message": messages["short.txt"],
-        }, context).splitlines())
-        
-        body = render_to_string("notification/email_body.txt", {
-            "message": messages["full.txt"],
-        }, context)
-        
-        notice = Notice.objects.create(recipient=user, message=messages["notice.html"],
-            notice_type=notice_type, on_site=on_site, sender=sender)
-        if should_send(user, notice_type, "1") and user.email and user.is_active: # Email
-            recipients.append((subject, body, from_email, [user.email]))
-    send_mass_mail(recipients)
-    
+
+        for backend in NOTIFICATION_BACKENDS.values():
+            if backend.can_send(user, notice_type):
+                backend.deliver(user, sender, notice_type, extra_context)
+                sent = True
+
     # reset environment to original language
     activate(current_language)
+    return sent
 
 
 def send(*args, **kwargs):
