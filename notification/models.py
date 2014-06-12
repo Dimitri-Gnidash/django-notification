@@ -66,7 +66,10 @@ NOTICE_MEDIA = (
 NOTICE_MEDIA_DEFAULTS = {
     0: 1,
     1: 1,
-    2: 1
+    2: 1,
+    '0': 1,
+    '1': 1,
+    '2': 2
 }
 
 class NoticeSetting(models.Model):
