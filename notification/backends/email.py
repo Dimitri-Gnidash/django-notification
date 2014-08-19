@@ -27,15 +27,11 @@ class EmailBackend(backends.BaseBackend):
 
         messages = self.get_formatted_messages((
             "short.txt",
-            "full.txt"
+            "full.txt",
+            "notice.html",
+            "full.html",
         ), notice_type.label, context)
 
-        subject = "".join(render_to_string("notification/email_subject.txt", {
-            "message": messages["short.txt"],
-        }, context).splitlines())
-
-        body = render_to_string("notification/email_body.txt", {
-            "message": messages["full.txt"],
-        }, context)
-
-        send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [recipient.email])
+        from notification.models import Notice
+        notice = Notice.objects.create(recipient=recipient, message=messages["notice.html"],
+            notice_type=notice_type, on_site=True, sender=sender)
